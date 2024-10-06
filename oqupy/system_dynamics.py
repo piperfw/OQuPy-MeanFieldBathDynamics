@@ -789,15 +789,17 @@ def _apply_derivative_pt_mpos(current_node,current_edges,pt_mpos):
 # -- compute n-time correlations ----------------------------------------------
 
 def compute_correlations_nt(
-        system: BaseSystem,
-        process_tensor: BaseProcessTensor,
+        system: Union[BaseSystem, MeanFieldSystem],
+        process_tensor: Union[BaseProcessTensor, List[BaseProcessTensor]],
         operators: List[ndarray],
         ops_times: List[Union[Indices, float, Tuple[float, float]]],
         ops_order: List[Text],
-        initial_state: Optional[ndarray] = None,
+        initial_state: Optional[Union[ndarray, List[ndarray]]] = None,
         start_time: Optional[float] = 0.0,
         dt: Optional[float] = None,
         progress_type: Text = None,
+        initial_field: Optional[complex] = None,
+        target_mean_field_system: Optional[int] = None,
     ) -> Tuple[List[ndarray], ndarray]:
     r"""
     Compute n-time correlations for a given system Hamiltonian.
@@ -845,22 +847,43 @@ def compute_correlations_nt(
 
     """
 
-    assert isinstance(system, BaseSystem)
-    assert isinstance(process_tensor, BaseProcessTensor)
-    dim = system.dimension
-    assert process_tensor.hilbert_space_dimension == dim
+    assert isinstance(system, Union[BaseSystem, MeanFieldSystem]) 
+    #assert isinstance(process_tensor, BaseProcessTensor) or isinstance(process_tensor, List[BaseProcessTensor])
+    if isinstance(system, MeanFieldSystem):
+        assert initial_field is not None
+        try:
+            initial_field = complex(initial_field)
+        except TypeError:
+            raise TypeError("Initial field must be convertible to complex type") 
+        if target_mean_field_system is None:
+            target_mean_field_system = 0
+        else:
+            assert 0 <= target_mean_field_system <= len(system.system_list)
+        dim = system.system_list[target_mean_field_system].dimension
+        #assert len(system.system_list) == 1, "Correlation calculations " \
+        #        "support MeanFieldSystems with only one "\
+        #        "TimeDependentSystemWithField"
+        # dimension check...
+        # length initial state, PT list etc.
+        pt_dt = process_tensor[target_mean_field_system].dt
+        max_step = len(process_tensor[target_mean_field_system])
+    else:
+        dim = system.dimension
+        assert process_tensor.hilbert_space_dimension == dim
+        pt_dt = process_tensor.dt
+        max_step = len(process_tensor)
 
     for i in range(len(operators)):
         assert operators[i].shape == (dim,dim)
     assert isinstance(start_time, float)
 
     if dt is None:
-        assert process_tensor.dt is not None, \
+        assert pt_dt is not None, \
             "It is necessary to specify time step `dt` because the given " \
              + "tensor has none."
-        dt_ = process_tensor.dt
+        dt_ = pt_dt
     else:
-        if (process_tensor.dt is not None) and (process_tensor.dt != dt):
+        if (pt_dt is not None) and (pt_dt != dt):
             warnings.warn("Specified time step `dt` does not match `dt` " \
                 + "stored in the given process tensor " \
                 + f"({dt}!={process_tensor.dt}). " \
@@ -876,7 +899,6 @@ def compute_correlations_nt(
 #Input parsing; ensures that specified times that are not an integer multiple
 #of dt are assigned the closest integer multiple.------------------------------
 
-    max_step = len(process_tensor)
 
     ops_times_=[]
     ret_times=[] #These are the times returned by the function
@@ -899,6 +921,8 @@ def compute_correlations_nt(
         "process_tensor": process_tensor,
         "initial_state": initial_state,
         "start_time": start_time,
+        "initial_field": initial_field,
+        "target_mean_field_system": target_mean_field_system,
         }
 
 #Schedule determines in what order all the correlations are calculated.-------
@@ -940,15 +964,17 @@ def compute_correlations_nt(
     return ret_times, ret_correlations
 
 def _compute_ordered_nt_correlations(
-        system: BaseSystem,
-        process_tensor: BaseProcessTensor,
+        system: Union[BaseSystem, MeanFieldSystem],
+        process_tensor: Union[BaseProcessTensor, List[BaseProcessTensor]],
         operators: List[ndarray],
         first_times: Tuple[int, ...],
         last_times: ndarray,
         ops_order: List[Text],
-        initial_state: Optional[ndarray] = None,
+        initial_state: Optional[Union[ndarray, List[ndarray]]] = None,
         start_time: Optional[float] = 0.0,
         dt: Optional[float] = None,
+        initial_field: Optional[complex] = None,
+        target_mean_field_system: Optional[int] = None,
     ) -> Tuple[ndarray]:
     """
     Compute ordered system correlations for a given system Hamiltonian.
@@ -966,7 +992,10 @@ def _compute_ordered_nt_correlations(
 
 
     max_step = last_times.max()
-    dim = system.dimension
+    if isinstance(system, MeanFieldSystem):
+        dim = system.system_list[target_mean_field_system].dimension
+    else:
+        dim = system.dimension
     control = Control(dim)
 
 #Insert n-1 superoperators into the tensor network at relevant time steps:
@@ -976,15 +1005,35 @@ def _compute_ordered_nt_correlations(
 #Correlation function is computed by taking the expectation value of the n^th
 #superoperator.----------------------------------------------------------------
 
-    dynamics = compute_dynamics(
-        system=system,
-        process_tensor=process_tensor,
-        control=control,
-        start_time=start_time,
-        initial_state=initial_state,
-        dt=dt,
-        num_steps=max_step,
-        progress_type='silent')
+    if isinstance(system, MeanFieldSystem):
+        control_list = []
+        for i in range(len((system.system_list))):
+            if i == target_mean_field_system:
+                control_list.append(control)
+            else:
+                d = system.system_list[i].dimension
+                control_list.append(Control(dim))
+        mean_field_dynamics = compute_dynamics_with_field(
+            mean_field_system=system,
+            process_tensor_list=process_tensor,
+            initial_field=initial_field,
+            control_list=control_list,
+            start_time=start_time,
+            initial_state_list=initial_state,
+            dt=dt,
+            num_steps=max_step,
+            progress_type='silent')
+        dynamics = mean_field_dynamics._system_dynamics[target_mean_field_system]
+    else:
+        dynamics = compute_dynamics(
+            system=system,
+            process_tensor=process_tensor,
+            control=control,
+            start_time=start_time,
+            initial_state=initial_state,
+            dt=dt,
+            num_steps=max_step,
+            progress_type='silent')
     _, corr = dynamics.expectations(operators[-1])
     ret_correlations = corr[last_times]
     return ret_correlations
@@ -1020,6 +1069,8 @@ def compute_correlations(
         start_time: Optional[float] = 0.0,
         dt: Optional[float] = None,
         progress_type: Text = None,
+        initial_field: Optional[complex] = None,
+        target_mean_field_system: Optional[int] = None,
     ) -> Tuple[List[ndarray], ndarray]:
     r"""
     Compute system correlations for a given system Hamiltonian.
@@ -1030,7 +1081,7 @@ def compute_correlations(
 
     Parameters
     ----------
-    system: BaseSystem
+    system: Union[BaseSystem, MeanFieldSystem]
         Object containing the system Hamiltonian.
     process_tensor: BaseProcessTensor
         A process tensor object.
@@ -1077,7 +1128,6 @@ def compute_correlations(
         operators = [operator_b, operator_a]
         ops_times = [times_b, times_a]
 
-
     corr = compute_correlations_nt(system = system,
                                    process_tensor = process_tensor,
                                    operators = operators,
@@ -1086,7 +1136,10 @@ def compute_correlations(
                                    initial_state = initial_state,
                                    start_time = start_time,
                                    dt = dt,
-                                   progress_type=progress_type)
+                                   progress_type=progress_type,
+                                   initial_field = initial_field,
+                                   target_mean_field_system=\
+                                           target_mean_field_system)
 
     if time_order == "anti":
         corr = (corr[0][::-1], corr[-1].transpose())

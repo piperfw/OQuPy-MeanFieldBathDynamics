@@ -18,14 +18,14 @@ D. Gribben, A. Strathearn, G. E. Fux, P. Kirton, and B. W. Lovett,
 arXiv:2106.04212 [quant-ph] (2021).
 """
 
-from typing import Optional, Text, Tuple
+from typing import Optional, List, Text, Tuple, Union
 import numpy as np
 from numpy import ndarray
 
 from oqupy.base_api import BaseAPIClass
 from oqupy.process_tensor import BaseProcessTensor
 from oqupy.bath import Bath
-from oqupy.system import BaseSystem
+from oqupy.system import BaseSystem, MeanFieldSystem
 from oqupy.config import NpDtype
 from oqupy.system_dynamics import compute_correlations
 
@@ -55,24 +55,38 @@ class TwoTimeBathCorrelations(BaseAPIClass):
     """
     def __init__(
             self,
-            system: BaseSystem,
+            system: Union[BaseSystem, MeanFieldSystem],
             bath: Bath,
-            process_tensor: BaseProcessTensor,
-            initial_state: Optional[ndarray] = None,
+            process_tensor: Union[BaseProcessTensor, List[BaseProcessTensor]],
+            initial_state: Optional[Union[ndarray, List[ndarray]]] = None,
             system_correlations: Optional[ndarray] = None,
             name: Optional[Text] = None,
-            description: Optional[Text] = None) -> None:
+            description: Optional[Text] = None,
+            target_mean_field_system: Optional[int] = None,
+            initial_field: Optional[complex] = None,
+            ) -> None:
         """Create a TwoTimeBathCorrelations object."""
         self._system = system
         self._bath = bath
 
-        initial_tensor = process_tensor.get_initial_tensor()
-        assert (initial_state is None) ^ (initial_tensor is None), \
+        if isinstance(system, MeanFieldSystem):
+            assert target_mean_field_system is not None
+            assert initial_field is not None
+            assert len(process_tensor) == len(system.system_list)
+            self._process_tensor = process_tensor[target_mean_field_system]
+            self._process_tensor_list = process_tensor
+            initial_tensor = process_tensor[target_mean_field_system].get_initial_tensor()
+        else:
+            self._process_tensor_list = None
+            initial_tensor = process_tensor.get_initial_tensor()
+            self._process_tensor = process_tensor
+        assert (initial_state is None) or (initial_tensor is None), \
             "Initial state must be either (exclusively) encoded in the " \
             + "process tensor or given as an argument."
 
-        self._process_tensor = process_tensor
         self._initial_state = initial_state
+        self._target_mean_field_system = target_mean_field_system
+        self._initial_field = initial_field
 
         if system_correlations is None:
             self._system_correlations = np.array([[]], dtype=NpDtype)
@@ -124,17 +138,21 @@ class TwoTimeBathCorrelations(BaseAPIClass):
         else:
             times_b = slice(current_corr_dim, corr_mat_dim)
         dim_diff = corr_mat_dim - current_corr_dim
+        pt_argument = self._process_tensor_list if self._process_tensor_list is not None else self._process_tensor
         if dim_diff > 0:
             coup_op = self.bath.unitary_transform \
                 @ self.bath.coupling_operator \
                 @ self.bath.unitary_transform.conjugate().T
             _,_new_sys_correlations = \
                 compute_correlations(self.system,
-                                     self._process_tensor,
+                                     pt_argument,
                                      coup_op, coup_op,
                                      times_a, times_b,
                                      initial_state = self.initial_state,
-                                     progress_type=progress_type)
+                                     progress_type=progress_type,
+                                     target_mean_field_system = \
+                                             self._target_mean_field_system,
+                                     initial_field = self._initial_field)
 
             self._system_correlations = np.pad(self._system_correlations,
                                                ((0, dim_diff), (0, 0)),
